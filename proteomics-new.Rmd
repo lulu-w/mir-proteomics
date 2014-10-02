@@ -1,0 +1,503 @@
+---
+title: "New Proteomics Data Set"
+author: "Lu Wang"
+output: html_document
+---
+```{r knitrOptions, echo = FALSE, warning = FALSE}
+library(knitr)
+opts_chunk$set(echo=FALSE)
+#opts_knit$set(root.dir="")
+```  
+
+## Summary of Pipeline
+
+![Summary of Pipeline][img01]
+
+# New Manually Validated Data 
+In the additional analysis, we received two excel files `manually validated spy vs 5fold proteins for VL 9-12-14.xlsx` and `H2AFY all peptides 9-10-14 A.xlsx` with manually validated data(New Data 2). Data from these files were used to replace the corresponding data from `Spy vs 5 FOLD all data for King Jordan 5-14-13 AP.csv`. The resulting file `Merge.DataSets.20141001.xlsx` with the merged data was then exported to `Merge.DataSets.20141001.csv` to run the same analysis as we previously did for the old data set `Spy vs 5 FOLD all data for King Jordan 5-14-13 AP.csv` in the directory `May.14.Proteomics.data from Amol`.
+
+Before the analysis, the data file was checked:
+
+**1. Are the expression values different for the same peptide? **
+
+No, they are different ??? Replace the peptide expression value with the expression values from the new data 2.
+
+**2. Are the peptide assignments different(i.e. the same peptide was assigned to different proteins)? **
+
+No, they are slightly different. For a given protein from the  validation, the assigned peptides are the same as or a subset of the old data set ??? Adopt the peptide assignment from new data 2
+    - The resulting merged dataset will have less peptides than the old dataset
+    - The peptides which were no longer assigned to the same protein in the new data 2 will be discarded
+
+In the following analysis, the new merged data set will be analyzed as a whole by
+
+- Performing the same normalization as we did on the old data set
+- Comparing the before and after normalization of the merged data set
+
+
+## Raw Data Processing
+
+In this file, there are two versions of the intensity data, one version is the **normalized** intensities while the other is the **not normalized** intensities. Below is the structure of the raw data: 
+
+```{r readRawData2, cache = TRUE}
+tb <- read.csv("Merge.DataSets.20141001.csv", skip = 1, header = TRUE)
+str(tb)
+```
+
+We used the **not normalized** version of the data for downstream analysis. The columns in the resulting *not normalized* file represents the different sample libraries and the rows represents different peptides. 
+
+```{r showNotNormalized2}
+colIndex = c(1,14:19)
+raw <- tb[, colIndex]
+head(raw, n = 2)
+```
+
+From the **metadata** that comes with the proteomics data set, we know that Mary's group uses **SPY** to label the **Self-renewing(SR)** cells and **5-Fold** to label the **Senescent(SEN)** cells. So I cleaned up the header for this table by giving them shorter labels.
+
+```{r cleanUpHeader2}
+colnames(raw) <- c("Annotation", "sr_1", "sr_2", "sr_3", "sen_1", "sen_2", "sen_3")
+```
+
+Since this data file contains a **mixture** of peptide intensities and protein intensities, and we first extracted the protein intensities from the mixture.
+
+```{r extractProtein2, cache = FALSE}
+raw <- raw[grep(">", raw$Annotation), ]
+head(raw, n = 2)
+total <- colSums(raw[, c( 2:7 )], na.rm = TRUE)
+```
+
+The total protein signal for each sample library were as follows:
+
+```{r plotTotalSig2}
+barplot(total, col = cm.colors(length(total)), xlab = "Sample", ylab = "Total Protein Intensity")
+```
+
+
+After extracting the protein intensities, we ended up with **`r nrow(raw)`** observations of intensity values for a given annotated protein. The majority of the protein annotations contains a **RefSeq protein ID**, a few of them does not. So I first extracted the proteins with **RefSeq protein IDs**.
+
+```{r extractRefSeq2, cache = FALSE}
+refseq <- raw[grep("NP_", raw$Annotation), ]
+```
+
+And we ended up with **`r nrow(refseq)`** proteins. The remaining proteins contains a large proportion of **PREDICTED hypothetical proteins**
+
+```{r showRemaining2}
+others <- raw[grep("NP_", raw$Annotation, invert = TRUE), ]
+head(others, n = 2)
+```
+
+We do not want to include these hypothetical proteins in our analysis. Therefore, the predicted hypothetical proteins were removed.
+
+```{r rmHypothetical2}
+others <- others[grep("XP_", others$Annotation, invert = TRUE), ]
+head(others, n = 2)
+```
+
+From Mary's raw data file `Pinpoint export all  Spy vs 5Fold (2010 data) HCD normalized  for King Jordan 5-7-13.xlsx`, which is the normalized only data file for the same experiemnt, there is a note stating that **"Annotation NOTE: IGNORE ALL KERATIN, TRYPSIN, Angiotensin these are sample prep related"**. Therefore, I also removed all keratin, trypsin and angiotensin proteins.
+
+```{r rmMore2}
+others <- others[grep("keratin", others$Annotation, invert = TRUE, ignore.case = TRUE), ]
+others <- others[grep("angiotensin", others$Annotation, invert = TRUE, ignore.case = TRUE), ]
+others <- others[grep("trypsin", others$Annotation, invert = TRUE, ignore.case = TRUE), ]
+others
+prot <- rbind(refseq, others)
+rm(refseq)
+rm(others)
+```
+
+After filtering, the remaining proteins which does have RefSeq IDs were **added back** to the previous extracted **RefSeq Protein** group for downstream analysis. The total observations for proteins is **`r nrow(prot)`**.
+
+
+## Data Reformatting
+
+**1. Extracting the RefSeq Protein IDs**    
+    
+Since the annotation for proteins in the original data file is very long and did not contain corresponding gene that encodes each proteins. I further extracted the **RefSeq Protein IDs** and queried against ENSEMBL database to find the corresponding gene which encodes each protein.
+
+```{r extractID2}
+ids <- gsub("^>.+ref\\|", "", prot$Annotation)
+ids <- gsub("\\|.+\\]$", "", ids)
+res.1 <- sapply(ids, nchar)
+ids <- gsub("\\.[0-9]{1}$", "", ids)
+res.2 <- sapply(ids, nchar)
+ifelse(sum(res.1 - res.2) == nrow(prot)*2, "ID extracted", "ERROR!")
+prot <- cbind(prot, id = ids, stringsAsFactors = FALSE)
+prot <- prot[, c(8, 2:7, 1)]
+head(prot, n = 2)
+```
+
+**2. Checking for Duplicated IDs**    
+
+After extracting RefSeq ID for each protein data entry, I checked for duplicated IDs in this data set.
+
+```{r checkDuplicatedID2}
+dup.1 <- prot[duplicated(prot$id), ]
+dup.2 <- prot[duplicated(prot$id, fromLast = TRUE), ]
+dup.id <- dup.1$id
+dup.prot <- rbind(dup.1, dup.2)
+dup.prot <- dup.prot[order(dup.prot$id), ]
+head(dup.prot)
+prot <- prot[! prot$id %in% dup.id, ]
+```
+
+In total, there are **`r nrow(dup.prot)`** of **protein** entries which have the same **RefSeq Protein ID**. Each RefSeq protein ID appears exactly **twice** in the data set. 
+
+After further checking the **Annotation** and the **peptide assignment** from the raw data, it seemed that the duplications resulted from the duplicated **"[MASS=....]"** phrase in **one of** the duplication pairs. Unique peptides were assigned to two versions of annotation for a certain protein only one time. Therefore, the solution was to **merge the intensity values** for the same **RefSeq Protein ID**.
+```{r mergeDuplicated2}
+dup.prot.annot <- dup.prot$Annotation
+dup.prot.annot <- gsub("\\[MASS=[0-9]+\\]", "", dup.prot.annot)
+dup.prot.annot <- gsub("\\s+$", "", dup.prot.annot)
+dup.prot.annot <- unique(dup.prot.annot)
+  
+dup.prot <- dup.prot[, 1:7]
+head(dup.prot, 2)
+dup.merged <- aggregate(. ~ id, dup.prot, sum)
+head(dup.merged, 1)
+dup.merged <- cbind(dup.merged, Annotation = dup.prot.annot)
+prot <- rbind(prot, dup.merged)
+```
+After merging, the **`r nrow(dup.merged)`** unique protein entries were added back to the original protein intensities.
+     
+**2. Finding Corresponding HGNC Gene Symbols**
+
+The HGNC gene symbol for genes which encodes corresponding protein products where searched for in the ENSEMBL database.
+
+```{r searchSymbol2, cache = TRUE}
+library(biomaRt)
+getSymbol <- function(x){
+    ensembl = useMart("ensembl", dataset = "hsapiens_gene_ensembl")
+    res <- getBM( attributes = c("refseq_peptide", "hgnc_symbol"), filters = "refseq_peptide", values = x, mart = ensembl)
+}
+res1 <- getSymbol(prot$id)
+```
+
+```{r showSymbol2}
+head(res1, n = 2)
+mdf <- merge( prot, res1, by.x = "id", all.x = TRUE, by.y = "refseq_peptide")
+mdf <- mdf[, c(1, 9, 2:7, 8)]
+head(mdf, n = 2)
+prot <- mdf
+rm(mdf)
+prot[ which(prot$hgnc_symbol == "SMARCA5"), ]
+```
+
+For certain **RefSeq protein IDs** which the database could not give a corresponding HGNC gene symbol, I used the Refseq Protein ID to take the place of the missing HGNC symbol. 
+
+```{r replaceNA2}
+#Replace the NA in gene_symbol where there is no match for ID
+err <- which(! complete.cases(prot[, 1:2]))
+head(prot[err, ], 2 )
+
+#Remove empty hgnc_symbol
+prot$hgnc_symbol <- ifelse( nchar(prot$hgnc_symbol) == 0, NA, prot$hgnc_symbol)
+
+#Remove NA hgnc_symbol
+prot$hgnc_symbol <- ifelse( is.na(prot$hgnc_symbol), prot$id, prot$hgnc_symbol)
+```
+
+After replacing the missing HGNC symbols, the missing HGNC symbols had a RefSeq ID to take thier places.
+
+```{r showReplaced2 }
+head(prot[err, ], 2)
+```
+
+## Missing Value Imputation
+
+The raw data coming from the proteomics experiment contains some missing values.
+
+```{r checkNA2}
+prot.miss <- prot[! complete.cases(prot), ]
+head(prot.miss, 2)
+prot <- prot[ complete.cases(prot), ]
+```
+
+In total, there are **`r nrow(prot.miss)`** entries with one or more missing values and the number of proteins with no missing value was **`r nrow(prot)`**.
+
+First I splitted the portion of the data set which contains **NA** values for **SEN** and **SR** samples. Count for each entry of these data how many **NA** out of the three replicates does each cell type have. 
+
+Specifically, for protein entries with missing value(s), I dropped ones that matches one of the following cases:
+
+- Missed more than or equal to two values from any of the two cell types.
+- Missed all three values from one cell type AND miss more than or equal to one value from the other cell type
+
+```{r filterNA2}
+countNA <- function(x){
+    sum(is.na(x))
+}
+prot.miss.sr <- prot.miss[ , c(1:5)]
+prot.miss.sen <- prot.miss[ , c( 1, 6:9)]
+res <- apply(prot.miss.sr, 1, countNA)
+prot.miss.sr <- cbind( prot.miss.sr, na.count.sr = res )
+res <- apply(prot.miss.sen, 1, countNA)
+prot.miss.sen <- cbind( prot.miss.sen, na.count.sen = res )
+mdf <- merge( prot.miss.sr, prot.miss.sen, by.x = "id", by.y = "id")
+head(mdf, 2)
+mdf.1 <- mdf[( mdf$na.count.sr < 2 & mdf$na.count.sen < 2 ), ]
+mdf.2 <- mdf[( mdf$na.count.sr == 3 & mdf$na.count.sen < 1 ) | ( mdf$na.count.sr < 1 & mdf$na.count.sen ==3 ), ]
+rm(mdf)
+```
+
+After the filtering, there are **`r nrow(mdf.1) + nrow(mdf.2)`** protein entries with missing values left.
+
+For these remaining entries, missing values were imputed as follows
+
+- **First Case:** For proteins missed only one value from one or both of the cell types, missing intensity value for protein $i$ from replicate $j$ were estimated based on known intensity values from the same condition 
+
+$I_{i,j} = \frac{\sum_{n=1}^{N_{i}} I_{n,j} }{N_{i}}$
+
+where $N_{i}$ ( $N_{i}<=3$) is the number of non-empty intensity values for protein $i$ from the same condition.
+
+- **Second Case:** For proteins missed all three values from one condition while having all three values from the other, the three missing values were replaced by **0**.
+
+The two examples below showed the **before** and **after** missing value imputation results for proteins from the **first case**.
+
+```{r showNAres1_2}
+head(mdf.1, 2)
+imputeValue <- function( data ){
+    x <- data[, 1]
+    y <- data[, 2]
+    z <- data[, 3]
+    x <- ifelse( is.na(x), rowMeans(cbind( y, z)), x )
+    y <- ifelse( is.na(y), rowMeans(cbind( x, z)), y )
+    z <- ifelse( is.na(z), rowMeans(cbind( x, y)), z )
+    res <- data.frame( x, y, z )
+}
+res.sr <- imputeValue(mdf.1[, c( 3:5 )])
+res.sen <- imputeValue(mdf.1[, c( 7:9 )])
+mdf.1 <- cbind(mdf.1[ , c(1,2)], sr_1 = res.sr$x, sr_2 = res.sr$y, sr_3 = res.sr$z, sen_1 = res.sen$x, sen_2 = res.sen$y, sen_3 = res.sen$z, Annotation = mdf.1$Annotation)
+head(mdf.1, 2)
+```
+
+The example below showed the **before** and **after** missing value imputation results for proteins from the **second case**.
+
+```{r showNAres2_2}
+mdf.2
+na2zero <- function(x){
+    x <- ifelse(is.na(x), 0, x)
+}
+res <- t(apply(mdf.2, 1, na2zero))
+mdf.2 <- rbind( mdf.2, res)
+mdf.2 <- mdf.2[ complete.cases(mdf.2), ]
+mdf.2 <- mdf.2[ , c(1:5, 7:10)]
+mdf.2
+prot <- rbind(prot, mdf.1, mdf.2)
+prot[, c( 3:8 )] <- apply(prot[, c( 3:8 )], 2, as.numeric)
+```
+
+After missing value imputation, there are **`r nrow(mdf.1) + nrow(mdf.2)`** proteins with missing values replaced/estimated. Processed data were merged back to the complete protein entries. The total proteins for downstream analysis becomes **`r nrow(prot)`**.
+   
+## Intensity Distribution before Normalization
+
+As seen in the boxplot below, before normalization, there are slight differences between libraries in their means and variations.
+
+```{r plotBeforeNorm2}
+library(reshape)
+mdf <- melt(prot, id.vars = c("id", "hgnc_symbol", "Annotation"), variable_name = "sample")
+boxplot( log2(value+1) ~ sample, mdf, ylab = expression(log[2]*"Area Under the Curve"), col = cm.colors(length(levels(mdf$sample))), ylim = c(10, 30))
+```
+
+
+The plot below showed the correlation between Log transformed intensity values from libraries. Before normalization, the intensity values are generally comparable. 
+
+```{r corrBeforeNorm2}
+pairs(log2(prot[, 3:8]), pch = 16, col = rgb(0,0.5,1,0.1), main = expression("Correlation of "*log[2]*" Intensities"))
+```
+
+Density plots below also showed that the Log transformed intensities were normally distributed and the have similar means before normalization.
+
+```{r densityBeforNorm2, warning = FALSE}
+library(ggplot2)
+g <- qplot(log2( value ), data = mdf, geom = "density", color = sample)
+g + labs( y = "Density", x = expression( log[2]*"Intensity" ))
+```
+    
+    
+## Normalizing Intensity Values
+After pre-processing, the raw intensity values were normalized. For protein $i$ from library $j$, the normalized intensity is calculated as:
+
+$I'_{i,j} = \frac{I_{i,j}}{\sum_{k=1}^{N} I_{k}}$
+
+where $N$ is the total number of proteins from library $j$. Below are two example of normalized protein intensities.
+
+## Intensity Distribution after Normalization
+Below are two examples of proteins after normalization.
+
+```{r normalizeData2}
+prot.raw <- prot
+#Normalization
+res <- t(apply( prot[, 3:8 ], 1, function(x) x/total ))
+prot[, 3:8] <- res
+head(prot, 2)
+
+#log transformation for make plots
+prot.log <- prot
+res <- log2(res + 1e-8)
+prot.log[, 3:8] <- res
+rm(res)
+```
+     
+After normalization, variation across libraries were reduced.
+     
+```{r plotNormalized2, warning = FALSE}
+#Boxplot
+mdf <- melt( prot.log, id.vars = c("id", "hgnc_symbol", "Annotation"), variable_name = "sample")
+boxplot( value ~ sample, mdf, ylab = expression(log[2]*"Area Under the Curve"), col = cm.colors(length(levels(mdf$sample))))
+
+#Correlation
+pairs( prot.log[, 3:8], pch = 16, col = rgb(0,0.5,1,0.1), main = expression("Correlation of "*log[2]*" Intensities"))
+
+#Density
+g <- qplot( value, data = mdf, geom = "density", color = sample)
+g + labs( y = "Density", x = expression( log[2]*"Intensity" ))
+```
+
+```{r saveBoxplotAfter2, eval = FALSE, cache = FALSE}
+
+pdf("boxplot.after.pdf", height = 8, width = 8)
+boxplot( value ~ sample, mdf, ylab = expression(log[2]*"Area Under the Curve"), col = cm.colors(length(levels(mdf$sample))))
+dev.off()
+```
+
+```{r saveDensityAfter2, eval = FALSE, cache = FALSE}
+pdf("density.after.pdf", height = 4, width = 8)
+g <- qplot( value, data = mdf, geom = "density", color = sample)
+g + labs( y = "Density", x = expression( log[2]*"Intensity" ))
+dev.off()
+```
+    
+## Differential Expression Analysis
+
+After normalization, expression levels for proteins from two conditions are compared. 
+
+```{r diffExp2, message = FALSE, warning = FALSE, fig.height = 8, fig.width = 8}
+library(oompaBase)
+library(ClassDiscovery)
+library(gplots)
+library(genefilter)
+f <- factor(c(rep("sr", 3), rep("sen", 3)), levels = c("sen", "sr")) #level determines the order of t-test comparison: SEN-SR here
+m <- as.matrix( prot[, 3:8 ] )
+res <- rowttests(m,f)
+prot <- cbind( prot, p.value = res$p.value, t.statistic = res$statistic, diff.mean = res$dm )
+prot <- prot[, c( 1:8, 10, 11, 12, 9)]
+head(prot, 2)
+
+prot.log <- cbind( prot.log, p.value = res$p.value, t.statistic = res$statistic, diff.mean = res$dm )
+prot.log <- prot.log[, c( 1:8, 10, 11, 12, 9)]
+
+
+means <- rowMeans(m)
+sds <- apply(m,1,sd)
+z <- (m-means)/sds
+prot.z <- prot.log
+prot.z[, 3:8 ] <- z
+```
+
+ 
+```{r filterByPval2}
+cutoff = 0.05
+prot.up <- prot[ prot$p.value < cutoff & prot$t.statistic > 0, ]
+prot.up <- prot.up[ order(prot.up$p.value), ]
+head(prot.up)
+
+
+prot.dn <- prot[ prot$p.value < cutoff & prot$t.statistic < 0, ]
+prot.dn <- prot.dn[ order(prot.dn$p.value), ]
+head(prot.dn)
+
+
+prot.unchange <- prot[ prot$p.value >= cutoff, ]
+```
+
+**Two-sided T-tests with euqal variance** were applied on the normalized intensity values to compare differential expression in two cell types.
+
+The cutoff = **`r cutoff`** was applied on the p-value to filter out the differentially expressed proteins. After the cutoff, there were **`r nrow(prot.up)`** proteins found to be up-regulated in SEN while **`r nrow(prot.dn)`** proteins were found to be down-regulated in SEN.
+
+The heatmap below shows **Z-score** transformed expression level of differentially expressed proteins.
+
+```{r zTransformation2, fig.height = 5, fig.width = 5}
+library(gplots)
+z1 <- prot.z[ prot.z$p.value < cutoff, 3:8 ]
+z1 <- as.matrix(z1)
+heatmap.2(z1,main=bquote(paste("T test, cutoff=",.(cutoff))),dendrogram="row",Rowv=TRUE,Colv=FALSE,scale="none",trace="none",col=blueyellow(100),key=TRUE,symkey=FALSE, density.info="none",cexCol=0.9,cexRow=0.9,labCol = colnames(z1),labRow=FALSE)
+
+```
+
+## Raw Expression of Individual Protein before Normalization
+
+```{r calculateCV2}
+means <- rowMeans( prot[ ,c( 3:8 )])
+sds <- apply( prot[, c( 3:8 )], 1, sd )
+cv <- sds/means
+prot <- cbind( prot, cv = cv )
+```
+
+```{r topCV2, fig.height = 10, fig.width = 10}
+top.n <- 50
+prot.cv <- prot[order(prot$cv), ]
+prot.cv <- prot.cv[1:top.n, ]
+prot.cv <- prot.cv[order(prot.cv$hgnc_symbol), ]
+#head(prot.cv, 2)
+#tail(prot.cv, 2)
+checkCV <- function(data){
+    print(data)
+    name <- data[1]
+    expression <- data[2:7]
+    barplot(as.numeric(expression), col = cm.colors(length(expression)), main = paste(name))
+}
+
+```
+
+
+```{r checkMoreRaw2, fig.width = 4}
+check.symbol <- c("AGO3", "BCL6", "CHD2", "CHD4", "CHD8", "DROSHA", "GAPDH", "HDAC3", "HDAC5", "SAP18", "H1F0", "H2AFV", "H2AFX", "H3F3B", "H2AFY", "RPL13A", "HOXA1", "IGFBP3", "NAP1L1", "SMARCA5", "SUZ12", "USP6", "SMARCA1")
+check.raw <- prot.raw[prot.raw$hgnc_symbol %in% check.symbol, ]
+
+apply(check.raw[, 2:8], 1, checkCV)
+```
+
+
+## Normalized Expression Level of Individual Proteins
+
+Normalized protein expression level were extracted for given proteins of interest. For better visualization of individual panels, **the plots are on different y-axis ranges.**
+
+```{r checkIndividualProtein2, fig.height = 5, fig.width = 7}
+checkSymbol <- function(x){
+    print(prot[ prot$hgnc_symbol == x, ])
+    #print( prot.log[ prot.log$hgnc_symbol ==x, ] )
+    #print( prot.z[ prot.z$hgnc_symbol ==x, ] )
+    values <- prot[ prot$hgnc_symbol == x, ]
+    p <- prot[ prot$hgnc_symbol == x, "p.value" ]
+    if( nrow(values) == 0 )
+      {
+          print(paste("No data found for ", x))
+      }
+    else
+      {
+          values <- unlist(values[ 1, 3:8])
+          par( mfrow = c( 1, 2 ), mar = c(4, 4, 2, 1), oma = c(0, 0, 2, 0), cex = 0.7)
+          barplot( values, col = cm.colors(length(values)), xlab = "Sample", ylab = "Normalized Intensity")
+          values <- list( sr = c( values[ 1:3 ] ), sen = c( values[ 4:6 ] ))
+          boxplot( values, col = cm.colors(2), xlab = "Sample", ylab = "Normalized Intensity")
+          mtext( paste(x), outer = TRUE )
+          print(paste( "p-value = ", p ))
+      }
+}
+
+check.symbol <- c("AGO3", "BCL6", "CHD2", "CHD4", "CHD8", "DROSHA", "GAPDH", "HDAC3", "HDAC5", "SAP18", "H1F0", "H2AFV", "H2AFX", "H3F3B", "H2AFY", "RPL13A", "HOXA1", "IGFBP3", "NAP1L1", "SMARCA5", "SUZ12", "USP6", "SMARCA1")
+#pdf("check.symbol.pdf", height = 5, width = 7)
+sapply(check.symbol, checkSymbol)
+#checkSymbol( "SMARCA5" )
+#checkSymbol( "HOXA1" )
+#checkSymbol( "GAPDH" )
+#checkSymbol( "RPL13A" )
+#dev.off()
+```
+
+
+
+
+<!-- Note: No analysis or plotting allowed after this line( data integrity comproimsed) -->
+
+
+
+[001]:./data/protein_normalized.xlsx
+[img01]:proteomics-summary.gif
